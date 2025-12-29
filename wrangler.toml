@@ -1,0 +1,11 @@
+name = "feed-worker"
+main = "src/index.ts"
+compatibility_date = "2025-12-29"
+
+kv_namespaces = [
+  { binding = "FEED_KV", id = "2303c72194524d1a90f923e54057a9eb" },
+]
+
+triggers = { crons = ["*/10 * * * *"] }
+
+observability = { enabled = true }
