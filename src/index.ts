@@ -18,6 +18,7 @@ interface Subscription {
   createdAt: number;
   lastItemId?: string;
   lastItemDate?: number;
+  lastItemKey?: string;
   feedTitle?: string;
   errorCount?: number;
   lastError?: string;
@@ -29,6 +30,7 @@ interface FeedItem {
   link?: string;
   date?: number;
   summary?: string;
+  key?: string;
 }
 
 interface ParsedFeed {
@@ -453,13 +455,19 @@ async function processSubscription(
   const { newItems, latestItem } = diffItems(
     feed.items,
     subscription.lastItemId,
-    subscription.lastItemDate
+    subscription.lastItemDate,
+    subscription.lastItemKey
   );
 
   if (newItems.length === 0) {
-    if (latestItem && latestItem.id !== subscription.lastItemId) {
+    const latestChanged =
+      latestItem &&
+      (latestItem.id !== subscription.lastItemId ||
+        latestItem.key !== subscription.lastItemKey);
+    if (latestChanged && latestItem) {
       subscription.lastItemId = latestItem.id;
       subscription.lastItemDate = latestItem.date;
+      subscription.lastItemKey = latestItem.key;
     }
     if (latestItem || titleChanged) {
       await env.FEED_KV.put(
@@ -478,6 +486,7 @@ async function processSubscription(
   const lastPosted = newItems[newItems.length - 1];
   subscription.lastItemId = lastPosted.id;
   subscription.lastItemDate = lastPosted.date;
+  subscription.lastItemKey = lastPosted.key;
   subscription.errorCount = 0;
   subscription.lastError = undefined;
   await env.FEED_KV.put(
@@ -531,12 +540,14 @@ function parseFeed(xml: string): ParsedFeed {
     const items = ensureArray(channel.item)
       .map(normalizeRssItem)
       .filter(Boolean) as FeedItem[];
+    assignItemKeys(items);
     return { items, format: "rss", title: pickText(channel.title) };
   }
 
   if (parsed?.feed) {
     const entries = ensureArray(parsed.feed.entry);
     const items = entries.map(normalizeAtomEntry).filter(Boolean) as FeedItem[];
+    assignItemKeys(items);
     return { items, format: "atom", title: pickText(parsed.feed.title) };
   }
 
@@ -544,6 +555,7 @@ function parseFeed(xml: string): ParsedFeed {
     const items = ensureArray(parsed["rdf:RDF"].item)
       .map(normalizeRssItem)
       .filter(Boolean) as FeedItem[];
+    assignItemKeys(items);
     return { items, format: "rdf", title: pickText(parsed["rdf:RDF"].title) };
   }
 
@@ -636,6 +648,67 @@ function normalizeAtomEntry(entry: any): FeedItem | null {
   };
 }
 
+function assignItemKeys(items: FeedItem[]): void {
+  if (items.length === 0) return;
+  const linkKeys = items.map((item) => normalizeLinkKey(item.link));
+  const counts = new Map<string, number>();
+  for (const key of linkKeys) {
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  for (let i = 0; i < items.length; i += 1) {
+    const key = linkKeys[i];
+    if (key && counts.get(key) === 1) {
+      items[i].key = key;
+    }
+  }
+}
+
+function normalizeLinkKey(link?: string): string | undefined {
+  if (!link) return undefined;
+  const trimmed = link.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    const params = url.searchParams;
+    for (const key of Array.from(params.keys())) {
+      if (isTrackingParam(key)) {
+        params.delete(key);
+      }
+    }
+    const normalized = new URL(url.origin + url.pathname);
+    const entries = Array.from(params.entries()).sort(([a], [b]) =>
+      a.localeCompare(b)
+    );
+    for (const [key, value] of entries) {
+      normalized.searchParams.append(key, value);
+    }
+    let result = normalized.toString();
+    if (normalized.pathname !== "/" && result.endsWith("/")) {
+      result = result.slice(0, -1);
+    }
+    return result;
+  } catch {
+    return trimmed;
+  }
+}
+
+function isTrackingParam(key: string): boolean {
+  const lower = key.toLowerCase();
+  return (
+    lower.startsWith("utm_") ||
+    lower === "fbclid" ||
+    lower === "gclid" ||
+    lower === "yclid" ||
+    lower === "mc_cid" ||
+    lower === "mc_eid" ||
+    lower === "igshid" ||
+    lower === "ref" ||
+    lower === "ref_src"
+  );
+}
+
 function pickText(value: any): string | undefined {
   if (value == null) return undefined;
   if (typeof value === "string" || typeof value === "number")
@@ -679,7 +752,8 @@ function ensureArray<T>(value: T | T[] | undefined | null): T[] {
 function diffItems(
   items: FeedItem[],
   lastId?: string,
-  lastDate?: number
+  lastDate?: number,
+  lastKey?: string
 ): { newItems: FeedItem[]; latestItem?: FeedItem } {
   if (items.length === 0) return { newItems: [] };
 
@@ -690,13 +764,20 @@ function diffItems(
 
   const latestItem = sorted[sorted.length - 1];
 
-  if (!lastId && !lastDate) {
+  if (!lastId && !lastDate && !lastKey) {
     return { newItems: [], latestItem };
   }
 
   let newItems: FeedItem[] = [];
 
-  if (lastId) {
+  if (lastKey) {
+    const index = sorted.findIndex((item) => item.key === lastKey);
+    if (index >= 0) {
+      newItems = sorted.slice(index + 1);
+    }
+  }
+
+  if (newItems.length === 0 && lastId) {
     const index = sorted.findIndex((item) => item.id === lastId);
     if (index >= 0) {
       newItems = sorted.slice(index + 1);
@@ -707,7 +788,14 @@ function diffItems(
     newItems = sorted.filter((item) => item.date && item.date > lastDate);
   }
 
-  if (newItems.length === 0 && latestItem && latestItem.id !== lastId) {
+  const latestMatchesId = lastId && latestItem?.id === lastId;
+  const latestMatchesKey = lastKey && latestItem?.key === lastKey;
+  if (
+    newItems.length === 0 &&
+    latestItem &&
+    !latestMatchesId &&
+    !latestMatchesKey
+  ) {
     newItems = [latestItem];
   }
 

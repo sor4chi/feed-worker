@@ -6,6 +6,6 @@ kv_namespaces = [
   { binding = "FEED_KV", id = "2303c72194524d1a90f923e54057a9eb" },
 ]
 
-triggers = { crons = ["*/10 * * * *"] }
+triggers = { crons = ["*/10 0-14 * * *", "*/10 21-23 * * *"] }
 
 observability = { enabled = true }
